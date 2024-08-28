@@ -8,6 +8,23 @@ const BLOCK_SIZE = 1 << BLOCK_DEPTH
 struct Block
     data::Matrix{Float64}
 end
+#define _00 0
+#define _01 1
+#define _10 2
+#define _11 3
+
+#define TR_00 _00
+#define TR_01 _10
+#define TR_10 _01
+#define TR_11 _11
+const TOP_LEFT = 1
+const TOP_RIGHT = 2
+const BOTTOM_LEFT = 3
+const BOTTOM_RIGHT = 4
+const TRANS_TOP_LEFT = 1
+const TRANS_TOP_RIGHT = 3
+const TRANS_BOTTOM_LEFT = 2
+const TRANS_BOTTOM_RIGHT = 4
 
 Block() = Block(zeros(BLOCK_SIZE, BLOCK_SIZE))
 
@@ -24,34 +41,63 @@ end
 InternalNode() = InternalNode([nothing, nothing, nothing, nothing])
 
 function block_schur_full!(B::Block, A::Block, C::Block)
-    B.data .-= A.data * C.data'
-end
-
-function block_schur_half!(B::Block, A::Block, C::Block)
-    for i in 1:BLOCK_SIZE, j in 1:i
-        for k in 1:BLOCK_SIZE
-            B.data[i, j] -= A.data[i, k] * C.data[j, k]
+    for i in 1:BLOCK_SIZE
+        for j in 1:BLOCK_SIZE
+            for k in 1:BLOCK_SIZE
+                B.data[i, j] -= A.data[i, k] * C.data[j, k]
+            end
         end
     end
 end
 
-function block_backsub!(B::Block, U::Block)
-    for i in 1:BLOCK_SIZE, j in 1:BLOCK_SIZE
-        for k in 1:i-1
-            B.data[j, i] -= U.data[i, k] * B.data[j, k]
+function block_schur_half!(B::Block, A::Block, C::Block)
+    for i in 1:BLOCK_SIZE
+        for j in 1:i
+            for k in 1:BLOCK_SIZE
+                B.data[i, j] -= A.data[i, k] * C.data[j, k]
+            end
         end
-        B.data[j, i] /= U.data[i, i]
+    end
+end
+function block_backsub!(B, L)
+    n = size(B, 1)
+    for j in 1:n
+        for i in 1:n
+            for k in 1:(i-1)
+                B[i, j] -= L[i, k] * B[k, j]
+            end
+        B[i, j] /= L[i, i]
+        end
+    end
+end
+function block_backsub!(B::Block, L::Block)
+    for i in 1:BLOCK_SIZE
+        for j in 1:BLOCK_SIZE
+            for k in 1:(i-1)
+                B.data[i, j] -= L.data[i, k] * L.data[k, j]
+            end
+        B.data[i, j] /= L.data[i, i]
+        end
     end
 end
 
 function block_cholesky!(B::Block)
     for k in 1:BLOCK_SIZE
         if B.data[k, k] < 0
+            @show B.data
             error("Matrix is not numerically stable")
         end
-        B.data[k:end, k] ./= sqrt(B.data[k, k])
-        for j in k+1:BLOCK_SIZE, i in j:BLOCK_SIZE
-            B.data[i, j] -= B.data[i, k] * B.data[j, k]
+        x = sqrt(B.data[k, k])
+        for i in k:BLOCK_SIZE
+            B.data[i, k] /= x
+        end
+        for j in (k+1):BLOCK_SIZE
+            for i in j:BLOCK_SIZE
+                B.data[i, j] -= B.data[i, k] * B.data[j, k]
+                if (j > i && B.data[j, i] != 0)
+                    @show (i, j, B.data[j, j], "Upper not")
+                end
+            end
         end
     end
 end
@@ -74,10 +120,10 @@ function copy_matrix(depth::Int, a::Union{Node,Nothing})
     end
 
     depth -= 1
-    r00 = Threads.@spawn copy_matrix(depth, a.children[1])
-    r01 = Threads.@spawn copy_matrix(depth, a.children[2])
-    r10 = Threads.@spawn copy_matrix(depth, a.children[3])
-    r11 = copy_matrix(depth, a.children[4])
+    r00 = Threads.@spawn copy_matrix(depth, a.children[TOP_LEFT])
+    r01 = Threads.@spawn copy_matrix(depth, a.children[TOP_RIGHT])
+    r10 = Threads.@spawn copy_matrix(depth, a.children[BOTTOM_LEFT])
+    r11 = copy_matrix(depth, a.children[BOTTOM_RIGHT])
 
     return new_internal(fetch(r00), fetch(r01), fetch(r10), r11)
 end
@@ -94,15 +140,15 @@ function get_matrix(depth::Int, a::Union{Node,Nothing}, r::Int, c::Int)
         mid = 1 << depth
         if r < mid
             if c < mid
-                return get_matrix(depth, a.children[1], r, c)
+                return get_matrix(depth, a.children[TOP_LEFT], r, c)
             else
-                return get_matrix(depth, a.children[2], r, c - mid)
+                return get_matrix(depth, a.children[TOP_RIGHT], r, c - mid)
             end
         else
             if c < mid
-                return get_matrix(depth, a.children[3], r - mid, c)
+                return get_matrix(depth, a.children[BOTTOM_LEFT], r - mid, c)
             else
-                return get_matrix(depth, a.children[4], r - mid, c - mid)
+                return get_matrix(depth, a.children[BOTTOM_RIGHT], r - mid, c - mid)
             end
         end
     end
@@ -122,15 +168,15 @@ function set_matrix(depth::Int, a::Union{Node,Nothing}, r::Int, c::Int, value::F
         mid = 1 << depth
         if r < mid
             if c < mid
-                a.children[1] = set_matrix(depth, a.children[1], r, c, value)
+                a.children[TOP_LEFT] = set_matrix(depth, a.children[TOP_LEFT], r, c, value)
             else
-                a.children[2] = set_matrix(depth, a.children[2], r, c - mid, value)
+                a.children[TOP_RIGHT] = set_matrix(depth, a.children[TOP_RIGHT], r, c - mid, value)
             end
         else
             if c < mid
-                a.children[3] = set_matrix(depth, a.children[3], r - mid, c, value)
+                a.children[BOTTOM_LEFT] = set_matrix(depth, a.children[BOTTOM_LEFT], r - mid, c, value)
             else
-                a.children[4] = set_matrix(depth, a.children[4], r - mid, c - mid, value)
+                a.children[BOTTOM_RIGHT] = set_matrix(depth, a.children[BOTTOM_RIGHT], r - mid, c - mid, value)
             end
         end
     end
@@ -172,38 +218,78 @@ function mul_and_subT!(depth::Int, lower::Bool, a::Node, b::Node, r::Union{Node,
     end
 
     depth -= 1
-    r = isnothing(r) ? InternalNode() : r
 
-    Threads.@sync begin
-        if !isnothing(a.children[1]) && !isnothing(b.children[1])
-            Threads.@spawn mul_and_subT!(depth, lower, a.children[1], b.children[1], r.children[1])
-        end
-        if !lower && !isnothing(a.children[1]) && !isnothing(b.children[2])
-            Threads.@spawn mul_and_subT!(depth, false, a.children[1], b.children[2], r.children[2])
-        end
-        if !isnothing(a.children[3]) && !isnothing(b.children[1])
-            Threads.@spawn mul_and_subT!(depth, false, a.children[3], b.children[1], r.children[3])
-        end
-        if !isnothing(a.children[3]) && !isnothing(b.children[2])
-            Threads.@spawn mul_and_subT!(depth, lower, a.children[3], b.children[2], r.children[4])
-        end
+    if (isnothing(r))
+        r00, r01, r10, r11 = nothing, nothing, nothing, nothing
+    else
+        r00, r01, r10, r11 = r.children[TOP_LEFT], r.children[TOP_RIGHT], r.children[BOTTOM_LEFT], r.children[BOTTOM_RIGHT]
     end
 
-    Threads.@sync begin
-        if !isnothing(a.children[2]) && !isnothing(b.children[3])
-            Threads.@spawn mul_and_subT!(depth, lower, a.children[2], b.children[3], r.children[1])
-        end
-        if !lower && !isnothing(a.children[2]) && !isnothing(b.children[4])
-            Threads.@spawn mul_and_subT!(depth, false, a.children[2], b.children[4], r.children[2])
-        end
-        if !isnothing(a.children[4]) && !isnothing(b.children[3])
-            Threads.@spawn mul_and_subT!(depth, false, a.children[4], b.children[3], r.children[3])
-        end
-        if !isnothing(a.children[4]) && !isnothing(b.children[4])
-            Threads.@spawn mul_and_subT!(depth, lower, a.children[4], b.children[4], r.children[4])
-        end
+    t1,t2,t3,t4 = nothing, nothing, nothing, nothing
+    if !isnothing(a.children[TOP_LEFT]) && !isnothing(b.children[TRANS_TOP_LEFT])
+        t1 = Threads.@spawn mul_and_subT!(depth, lower, a.children[TOP_LEFT], b.children[TRANS_TOP_LEFT], r00)
+    end
+    if !lower && !isnothing(a.children[TOP_LEFT]) && !isnothing(b.children[TRANS_TOP_RIGHT])
+        t2 = Threads.@spawn mul_and_subT!(depth, false, a.children[TOP_LEFT], b.children[TRANS_TOP_LEFT], r01)
+    end
+    if !isnothing(a.children[BOTTOM_LEFT]) && !isnothing(b.children[TRANS_TOP_LEFT])
+        t3 = Threads.@spawn mul_and_subT!(depth, false, a.children[BOTTOM_LEFT], b.children[TRANS_TOP_LEFT], r10)
+    end
+    if !isnothing(a.children[BOTTOM_LEFT]) && !isnothing(b.children[TRANS_TOP_RIGHT])
+        t4 = Threads.@spawn mul_and_subT!(depth, lower, a.children[BOTTOM_LEFT], b.children[TRANS_TOP_RIGHT], r11)
+    end
+    if (t1 !== nothing)
+        r00 = fetch(t1)
+    end
+    if (t2 !== nothing)
+        r01 = fetch(t2)
+    end
+    if (t3 !== nothing)
+        r10 = fetch(t3)
+    end
+    if (t4 !== nothing)
+        r11 = fetch(t4)
     end
 
+    t1,t2,t3,t4 = nothing, nothing, nothing, nothing
+    if !isnothing(a.children[TOP_RIGHT]) && !isnothing(b.children[TRANS_BOTTOM_LEFT])
+        t1 = Threads.@spawn mul_and_subT!(depth, lower, a.children[TOP_RIGHT], b.children[TRANS_BOTTOM_LEFT], r00)
+    end
+    if !lower && !isnothing(a.children[TOP_RIGHT]) && !isnothing(b.children[TRANS_BOTTOM_RIGHT])
+        t2 = Threads.@spawn mul_and_subT!(depth, false, a.children[TOP_RIGHT], b.children[TRANS_BOTTOM_RIGHT], r01)
+    end
+    if !isnothing(a.children[BOTTOM_RIGHT]) && !isnothing(b.children[TRANS_BOTTOM_LEFT])
+        t3 = Threads.@spawn mul_and_subT!(depth, false, a.children[BOTTOM_RIGHT], b.children[TRANS_BOTTOM_LEFT], r10)
+    end
+    if !isnothing(a.children[BOTTOM_RIGHT]) && !isnothing(b.children[TRANS_BOTTOM_RIGHT])
+        t4 = Threads.@spawn mul_and_subT!(depth, lower, a.children[BOTTOM_RIGHT], b.children[TRANS_BOTTOM_RIGHT], r11)
+    end
+
+    if (t1 !== nothing)
+        r00 = fetch(t1)
+    end
+    if (t2 !== nothing)
+        r01 = fetch(t2)
+    end
+    if (t3 !== nothing)
+        r10 = fetch(t3)
+    end
+    if (t4 !== nothing)
+        r11 = fetch(t4)
+    end
+
+    if (isnothing(r))
+        r = new_internal(r00, r01, r10, r11)
+    else
+        @assert(r.children[TOP_LEFT] === nothing || r.children[TOP_LEFT] == r00)
+        @assert(r.children[TOP_RIGHT] === nothing || r.children[TOP_RIGHT] == r01)
+        @assert(r.children[BOTTOM_LEFT] === nothing || r.children[BOTTOM_LEFT] == r10)
+        @assert(r.children[BOTTOM_RIGHT] === nothing || r.children[BOTTOM_RIGHT] == r11)
+        r.children[TOP_LEFT] = r00
+        r.children[TOP_RIGHT] = r01
+        r.children[BOTTOM_LEFT] = r10
+        r.children[BOTTOM_RIGHT] = r11
+    end
     return r
 end
 
@@ -215,31 +301,57 @@ function backsub!(depth::Int, a::Node, l::Node)
 
     depth -= 1
 
-    Threads.@sync begin
-        if !isnothing(a.children[1])
-            Threads.@spawn backsub!(depth, a.children[1], l.children[1])
-        end
-        if !isnothing(a.children[3])
-            Threads.@spawn backsub!(depth, a.children[3], l.children[1])
-        end
+    a00, a01, a10, a11 = a.children[TOP_LEFT], a.children[TOP_RIGHT], a.children[BOTTOM_LEFT], a.children[BOTTOM_RIGHT]
+    l00, l10, l11 = l.children[TOP_LEFT], l.children[BOTTOM_LEFT], l.children[BOTTOM_RIGHT]
+    @assert(!isnothing(l00) && !isnothing(l11))
+    t1,t2 = nothing, nothing
+    if !isnothing(a00)
+        t1 = Threads.@spawn backsub!(depth, a00, l00)
+    end
+    if !isnothing(a10)
+        t2 = Threads.@spawn backsub!(depth, a10, l00)
+    end
+    if (t1 !== nothing)
+        a00 = fetch(t1)
+    end
+    if (t2 !== nothing)
+        a10 = fetch(t2)
     end
 
-    Threads.@sync begin
-        if !isnothing(a.children[1]) && !isnothing(l.children[3])
-            Threads.@spawn mul_and_subT!(depth, false, a.children[1], l.children[3], a.children[2])
-        end
-        if !isnothing(a.children[3]) && !isnothing(l.children[3])
-            Threads.@spawn mul_and_subT!(depth, false, a.children[3], l.children[3], a.children[4])
-        end
+
+    t1,t2 = nothing, nothing
+    if !isnothing(a00) && !isnothing(l10)
+        t1 = Threads.@spawn mul_and_subT!(depth, false, a00, l10, a10)
     end
-    Threads.@sync begin
-        if !isnothing(a.children[2])
-            Threads.@spawn backsub!(depth, a.children[2], l.children[4])
-        end
-        if !isnothing(a.children[4])
-            Threads.@spawn backsub!(depth, a.children[4], l.children[4])
-        end
+    if !isnothing(a10) && !isnothing(l10)
+        t2 = Threads.@spawn mul_and_subT!(depth, false, a10, l10, a11)
     end
+    if (t1 !== nothing)
+        a01 = fetch(t1)
+    end
+    if (t2 !== nothing)
+        a11 = fetch(t2)
+    end
+
+
+    t1,t2 = nothing, nothing
+    if !isnothing(a01)
+        t1 = Threads.@spawn backsub!(depth, a01, l11)
+    end
+    if !isnothing(a11)
+        t2 = Threads.@spawn backsub!(depth, a11, l11)
+    end
+    if (t1 !== nothing)
+        a01 = fetch(t1)
+    end
+    if (t2 !== nothing)
+        a11 = fetch(t2)
+    end
+
+    a.children[TOP_LEFT] = a00
+    a.children[TOP_RIGHT] = a01
+    a.children[BOTTOM_LEFT] = a10
+    a.children[BOTTOM_RIGHT] = a11
     return a
 end
 
@@ -248,37 +360,30 @@ function cilk_cholesky!(depth::Int, a::Node)
         block_cholesky!(a.block)
         return a
     end
-
+    global last_node = (a, depth)
     depth -= 1
 
-    if isnothing(a.children[3])
-        t = Threads.@spawn cilk_cholesky!(depth, a.children[1])
-        a.children[4] = cilk_cholesky!(depth, a.children[4])
-        a.children[1] = fetch(a.children[1])
-    else
-        a.children[1] = cilk_cholesky!(depth, a.children[1])
-        a.children[3] = backsub!(depth, a.children[3], a.children[1])
-        a.children[4] = mul_and_subT!(depth, true, a.children[3], a.children[3], a.children[4])
-        a.children[4] = cilk_cholesky!(depth, a.children[4])
-    end
+    a00 = a.children[TOP_LEFT]
+    a10 = a.children[BOTTOM_LEFT]
+    a11 = a.children[BOTTOM_RIGHT]
+    @assert(!isnothing(a00))
 
+    if (a10 === nothing)
+        t = Threads.@spawn cilk_cholesky!(depth, a00)
+        a11 = cilk_cholesky!(depth, a11)
+        a00 = fetch(t)
+    else
+        a00 = cilk_cholesky!(depth, a00)
+        a10 = backsub!(depth, a10, a00)
+        a11 = mul_and_subT!(depth, true, a10, a10, a11)
+        a11 = cilk_cholesky!(depth, a11)
+    end
+    a.children[TOP_LEFT] = a00
+    a.children[BOTTOM_LEFT] = a10
+    a.children[BOTTOM_RIGHT] = a11
     return a
 end
 
-function convert_to_julia(a::Node, m_size::Int)
-    if isnothing(a)
-        return nothing
-    end
-
-    if isa(a, LeafNode)
-        return a.block.data
-    end
-
-    return hcat(
-        vcat(convert_to_julia(a.children[1]), convert_to_julia(a.children[2])),
-        vcat(convert_to_julia(a.children[3]), convert_to_julia(a.children[4]))
-    )
-end
 
 function main()
     m_size = 500
@@ -332,4 +437,83 @@ function main()
     println("         output blocks     = $output_blocks")
 end
 
-main()
+
+function convert_to_matrix(a::AbstractMatrix, depth::Int)
+    A = nothing
+    for ind in eachindex(IndexCartesian(),a)
+        A = set_matrix(depth, A, ind.I[1] - 1, ind.I[2] - 1, a[ind])
+    end
+    return A
+end
+
+function convert_to_julia(a::Node, depth::Int, m_size::Int)
+    out = zeros(m_size, m_size)
+    for i in 1:m_size, j in 1:m_size
+        out[i,j] = get_matrix(depth, a, i-1, j-1)
+    end
+    return out
+end
+function make_spd(n)
+    Q = rand(n,n)
+    Q*Q'
+end
+
+function test(n)
+    M = make_spd(n)
+    cholesky(M)
+    depth = ceil(Int, log2(n))
+    m_size = n
+
+    println("trying matrix with size $n and depth $depth")
+    A = convert_to_matrix(M, depth)
+    for i in (m_size + 1):(1<<depth)
+        A = set_matrix(depth, A, i-1, i-1, 1.0)
+    end
+    R = copy_matrix(depth, A)
+    global testing_m = A, M
+    R = cilk_cholesky!(depth, R)
+    L = convert_to_julia(R, depth, m_size)
+    println("Error: ", norm(M - L*transpose(L)))
+end
+# main()
+#This is a forward sub
+function block_backsub!(B, L)
+    n = size(B, 1)
+    for j in 1:n
+        for i in 1:n
+            for k in 1:(i-1)
+                B[i, j] -= L[i, k] * B[k, j]
+            end
+        B[i, j] /= L[i, i]
+        end
+    end
+end
+
+function forwardsubstitution!(L::AbstractMatrix{T}, B::AbstractMatrix{T}) where T
+    n = size(L, 1)
+
+    for j in 1:n  # Iterate over each column of B
+        for i in 1:n
+            sum = zero(T)
+            for k in 1:i-1
+                sum += L[i, k] * B[k, j]
+            end
+            B[i, j] = (B[i, j] - sum) / L[i, i]
+        end
+    end
+
+    return B
+end
+
+function backsub2(B, U)
+    @assert size(B) == size(U)
+    n = size(B, 1)
+    for i in 1:n
+        for j in 1:n
+            for k in 1:i
+                B[j, i] -= U[i, k] * B[j, k]
+            end
+            B[j, i] /= U[i, i]
+        end
+    end
+end
